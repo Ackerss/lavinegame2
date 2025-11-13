@@ -187,6 +187,8 @@
         let currentStep = 0;
         let synth = window.speechSynthesis;
         let audioCtx;
+        let voicesLoaded = false;
+        let ptBrVoice = null;
 
         // --- SISTEMA DE ÁUDIO ---
         function initAudio() {
@@ -196,6 +198,40 @@
             if (audioCtx.state === 'suspended') {
                 audioCtx.resume();
             }
+        }
+
+        function loadVoices() {
+            return new Promise((resolve) => {
+                let voices = synth.getVoices();
+                
+                if (voices.length > 0) {
+                    ptBrVoice = voices.find(v => v.lang === 'pt-BR') || 
+                                voices.find(v => v.lang.startsWith('pt')) ||
+                                voices[0];
+                    voicesLoaded = true;
+                    resolve();
+                } else {
+                    synth.onvoiceschanged = () => {
+                        voices = synth.getVoices();
+                        ptBrVoice = voices.find(v => v.lang === 'pt-BR') || 
+                                    voices.find(v => v.lang.startsWith('pt')) ||
+                                    voices[0];
+                        voicesLoaded = true;
+                        resolve();
+                    };
+                    
+                    setTimeout(() => {
+                        if (!voicesLoaded) {
+                            voices = synth.getVoices();
+                            if (voices.length > 0) {
+                                ptBrVoice = voices[0];
+                                voicesLoaded = true;
+                            }
+                            resolve();
+                        }
+                    }, 1000);
+                }
+            });
         }
 
         function playSuccessSound() {
@@ -228,44 +264,82 @@
             osc.stop(audioCtx.currentTime + 0.3);
         }
 
-        function speak(text, delay = 0) {
+        async function speak(text, delay = 0) {
+            if (!voicesLoaded) {
+                await loadVoices();
+            }
+            
             setTimeout(() => {
                 try {
-                    if (synth.speaking) synth.cancel();
+                    if (synth.speaking) {
+                        synth.cancel();
+                    }
+                    
+                    if (synth.paused) {
+                        synth.resume();
+                    }
+                    
                     const utterThis = new SpeechSynthesisUtterance(text);
                     utterThis.lang = 'pt-BR';
-                    utterThis.rate = 1.0;
+                    utterThis.rate = 0.9;
                     utterThis.pitch = 1.2;
+                    utterThis.volume = 1.0;
+                    
+                    if (ptBrVoice) {
+                        utterThis.voice = ptBrVoice;
+                    }
+                    
+                    utterThis.onerror = (e) => {
+                        console.error('Erro ao falar:', e);
+                        
+                        setTimeout(() => {
+                            synth.cancel();
+                            const retry = new SpeechSynthesisUtterance(text);
+                            retry.lang = 'pt-BR';
+                            retry.rate = 0.9;
+                            retry.pitch = 1.2;
+                            synth.speak(retry);
+                        }, 100);
+                    };
+                    
                     synth.speak(utterThis);
+                    
                 } catch (e) { 
-                    console.error('Erro ao falar:', e); 
+                    console.error('Erro crítico ao falar:', e); 
                 }
             }, delay);
         }
 
         // --- LÓGICA DO JOGO ---
 
-        function startGame() {
+        async function startGame() {
             initAudio();
+            
+            await loadVoices();
+            
+            const testUtterance = new SpeechSynthesisUtterance('');
+            testUtterance.volume = 0;
+            synth.speak(testUtterance);
+            
             document.getElementById('startScreen').classList.add('hidden');
             document.getElementById('gameArea').classList.remove('hidden');
             
             setTimeout(() => {
                 resetGame(true);
-                speak("Onde está a letra L?");
-            }, 100);
+                speak("Onde está a letra L?", 100);
+            }, 150);
         }
 
         function getBubbleSize() {
             const width = window.innerWidth;
-            if (width < 640) return 70; // Mobile
-            if (width < 1024) return 85; // Tablet
-            return 100; // Desktop
+            if (width < 640) return 70;
+            if (width < 1024) return 85;
+            return 100;
         }
 
         function findSafePosition(placedRects, containerRect, elSize) {
             const margin = 15;
-            const paddingBetween = 20; // Espaço mínimo entre bolhas
+            const paddingBetween = 20;
             
             const validWidth = Math.max(containerRect.width || window.innerWidth, 320);
             const validHeight = Math.max(containerRect.height || window.innerHeight, 300);
@@ -294,8 +368,6 @@
             }
             
             if (attempts >= 100) { 
-                console.warn("Posicionamento: tentando em grid...");
-                // Fallback: posicionar em grid
                 const gridCols = Math.floor(validWidth / (elSize + paddingBetween));
                 const gridRows = Math.floor(validHeight / (elSize + paddingBetween));
                 const totalSlots = gridCols * gridRows;
@@ -363,7 +435,6 @@
             const bubbles = playArea.querySelectorAll('.letter-bubble');
             bubbles.forEach(b => b.remove());
 
-            // Criar slots
             const slotSize = window.innerWidth < 640 ? 'w-9 h-12' : (window.innerWidth < 1024 ? 'w-11 h-14' : 'w-16 h-20');
             const slotTextSize = window.innerWidth < 640 ? 'text-2xl' : (window.innerWidth < 1024 ? 'text-3xl' : 'text-5xl');
 
@@ -374,12 +445,10 @@
                 slotsContainer.appendChild(slot);
             });
 
-            // Aguardar renderização para obter dimensões corretas
             setTimeout(() => {
                 const containerRect = playArea.getBoundingClientRect();
                 
                 if(containerRect.width === 0 || containerRect.height === 0) {
-                    console.error("Área de jogo não visível. Tentando novamente...");
                     setTimeout(() => resetGame(useDefaultName), 200);
                     return; 
                 }
@@ -529,8 +598,6 @@
             }, 200);
         });
 
-        // --- LISTA DE PALAVRAS ---
-
         const wordList = [
             { palavra: "SOL", emoji: "☀️" },
             { palavra: "LUA", emoji: "🌙" },
@@ -598,27 +665,29 @@
             }
         }
 
-        function getNewWords() {
+        async function getNewWords() {
             showLoading(true, "Buscando nova palavra...");
 
-            setTimeout(() => {
-                let newIndex = -1;
-                do {
-                    newIndex = Math.floor(Math.random() * wordList.length);
-                } while (wordList.length > 1 && newIndex === lastWordIndex); 
-                
-                lastWordIndex = newIndex;
-                const randomItem = wordList[newIndex];
-                
-                targetName = randomItem.palavra.toUpperCase().split('');
-                currentEmoji = randomItem.emoji;
-                
-                resetGame(false); 
-                showLoading(false);
-                
-                speak(`Vamos aprender a palavra ${randomItem.palavra}`);
-            }, 600);
+            await new Promise(resolve => setTimeout(resolve, 600));
+            
+            let newIndex = -1;
+            do {
+                newIndex = Math.floor(Math.random() * wordList.length);
+            } while (wordList.length > 1 && newIndex === lastWordIndex); 
+            
+            lastWordIndex = newIndex;
+            const randomItem = wordList[newIndex];
+            
+            targetName = randomItem.palavra.toUpperCase().split('');
+            currentEmoji = randomItem.emoji;
+            
+            resetGame(false); 
+            showLoading(false);
+            
+            speak(`Vamos aprender a palavra ${randomItem.palavra}`, 200);
         }
+
+        loadVoices();
     </script>
 </body>
 </html>
